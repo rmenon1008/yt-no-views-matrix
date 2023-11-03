@@ -4,6 +4,7 @@ import datetime
 import json
 import time
 import os
+import re
 
 import cv2
 from yt_dlp import YoutubeDL
@@ -22,10 +23,8 @@ YDL_OPTIONS = {
     'format': 'worstvideo',
     'noplaylist': True,
     'quiet': True,
-    'max_views': 10,
-    'max_duration': 60,
     'outtmpl': "temp/%(id)s.mp4",
-    'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 10}]
+    'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 30}]
 }
 
 class Ydl:
@@ -33,60 +32,117 @@ class Ydl:
         self.options = options
         self.ydl = YoutubeDL(self.options)
 
-    def prelim_video_valid(self, candidate):
-        if candidate['view_count'] > 10:
-            print("Too many views")
-            return False
-        if "/shorts/" in candidate['url']:
-            print("Video is a short")
-            return False
-        if candidate["duration"] < 10:
-            print("Too short")
-            return False
-        return True
+    # def prelim_video_valid(self, candidate):
+    #     if candidate['view_count'] > 10:
+    #         print("Too many views")
+    #         return False
+    #     if "/shorts/" in candidate['url']:
+    #         print("Video is a short")
+    #         return False
+    #     if candidate["duration"] < 20:
+    #         print("Too short")
+    #         return False
+    #     return True
 
 
-    def secondary_video_valid(self, candidate):
-        age = datetime.datetime.now(
-        ) - datetime.datetime.strptime(candidate['upload_date'], "%Y%m%d")
-        if age.days > 30:
-            print("Video is too old")
-            return False
-        # if candidate['channel_follower_count'] == None or candidate['channel_follower_count'] > 500:
-        #     print("Channel is too big")
-        #     return False
-        if candidate['formats'][0]['width'] / candidate['formats'][0]['height'] < 1.5:
-            print("Video is too tall")
-            return False
-        return True
+    # def secondary_video_valid(self, candidate):
+    #     age = datetime.datetime.now(
+    #     ) - datetime.datetime.strptime(candidate['upload_date'], "%Y%m%d")
+    #     if age.days > 30:
+    #         print("Video is too old")
+    #         return False
+    #     if candidate['formats'][0]['width'] / candidate['formats'][0]['height'] < 1.5:
+    #         print("Video is too tall")
+    #         return False
+    #     return True
 
+
+    # def get_unwatched_video(self):
+    #     video = None
+    #     while video == None:
+    #         rand_num = str(random.randint(0, 7000)).zfill(4)
+    #         candidate = next(self.ydl.extract_info(
+    #             f"ytsearchdate:IMG {rand_num}", download=False, process=False)['entries'])
+    #         if not self.prelim_video_valid(candidate):
+    #             continue
+    #         candidate = self.ydl.extract_info(candidate['url'], download=False)
+    #         if not self.secondary_video_valid(candidate):
+    #             continue
+    #         video = candidate
+    #     return video
 
     def get_unwatched_video(self):
+        URL = "https://petittube.com/"
         video = None
-        while video == None:
-            rand_num = str(random.randint(0, 7000)).zfill(4)
-            candidate = next(self.ydl.extract_info(
-                f"ytsearchdate:IMG {rand_num}", download=False, process=False)['entries'])
-            if not self.prelim_video_valid(candidate):
-                continue
-            candidate = self.ydl.extract_info(candidate['url'], download=False)
-            if not self.secondary_video_valid(candidate):
-                continue
-            video = candidate
+        try:
+            with open('already_watched.json', 'r') as f:
+                already_watched = json.load(f)[:100]
+        except:
+            print("Creating new watched index")
+            already_watched = []
+        while video is None:
+            try:
+                r = get(URL)
+                if r.status_code == 200:
+                    text = r.text
+                    regex_match = re.search(r'src="https:\/\/www\.youtube\.com\/embed\/(.*?)\?', text)
+                    if regex_match:
+                        yt_id = regex_match.group(1)
+                        if yt_id in already_watched:
+                            print("Video already watched")
+                            continue
+                        else:
+                            already_watched.append(yt_id)
+                            with open('already_watched.json', 'w') as f:
+                                json.dump(already_watched, f)
+                        try:
+                            candidate = self.ydl.extract_info(f'https://www.youtube.com/watch?v={yt_id}', download=False)
+                            if candidate['formats'][0]['width'] / candidate['formats'][0]['height'] >= 1.5:
+                                video = candidate
+                            else:
+                                print("Video too tall")
+                        except:
+                            print("Video is unavailable")
+                            continue
+            except:
+                pass
         return video
 
     def download_video(self, video):
-        self.ydl.download([video['webpage_url']])
-        return f"temp/{video['id']}.mp4"
+        try:
+            print(f"Downloading video {video['webpage_url']}")
+            out = self.ydl.download([video['webpage_url']])
+            return f"temp/{video['id']}.mp4"
+        except:
+            return None
+
+def center_crop(image, aspect_ratio):
+    height, width = image.shape[:2]
+    image_aspect_ratio = width / height
+    if image_aspect_ratio > aspect_ratio:
+        # Crop width
+        new_width = int(height * aspect_ratio)
+        left = (width - new_width) // 2
+        right = width - new_width - left
+        return image[:, left:-right]
+    elif image_aspect_ratio < aspect_ratio:
+        # Crop height
+        new_height = int(width / aspect_ratio)
+        top = (height - new_height) // 2
+        bottom = height - new_height - top
+        return image[top:-bottom, :]
+    else:
+        return image
 
 def get_video_frames(video_file, resolution=(96, 48)):
-    print(video_file)
+    print(f"Getting frames: {video_file}")
     frames = []
     video = cv2.VideoCapture(video_file)
     while True:
         try:
             ret, frame = video.read()
-            frame = cv2.resize(frame, resolution)
+            frame = center_crop(frame, resolution[0]/resolution[1])
+            frame = cv2.resize(frame, resolution, interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             if not ret:
                 break
