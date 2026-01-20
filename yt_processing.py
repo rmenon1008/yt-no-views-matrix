@@ -134,6 +134,46 @@ def center_crop(image, aspect_ratio):
     else:
         return image
 
+def iter_video_frames(video_file, resolution=(96, 48), target_fps=30):
+    """
+    Stream frames from a local video file at (approximately) target_fps.
+    This avoids pre-decoding the whole video and avoids cross-process transfer of huge frame arrays.
+    """
+    print(f"Streaming frames: {video_file}")
+    cap = cv2.VideoCapture(video_file)
+    if not cap.isOpened():
+        print("Failed to open video")
+        cap.release()
+        return
+
+    start_time = time.perf_counter()
+    frame_index = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+
+        # Process frame for the LED matrix
+        try:
+            frame = center_crop(frame, resolution[0] / resolution[1])
+            frame = cv2.resize(frame, resolution, interpolation=cv2.INTER_AREA)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        except Exception:
+            # Skip bad frames rather than stalling playback
+            continue
+
+        # Pace output
+        target_time = start_time + (frame_index / float(target_fps))
+        now = time.perf_counter()
+        if target_time > now:
+            time.sleep(target_time - now)
+
+        frame_index += 1
+        yield frame
+
+    cap.release()
+
 def get_video_frames(video_file, resolution=(96, 48)):
     print(f"Getting frames: {video_file}")
     frames = []
