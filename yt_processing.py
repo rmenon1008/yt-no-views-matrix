@@ -2,6 +2,7 @@ import random
 import datetime
 import time
 import os
+import urllib.parse
 
 import cv2
 from yt_dlp import YoutubeDL
@@ -16,19 +17,64 @@ YDL_OPTIONS = {
 
 class Ydl:
     def __init__(self, options):
-        self.options = options
-        self.ydl = YoutubeDL(self.options)
-
-        self.max_age_days = 14
-        self.max_views = 200
+        # Coarse buckets:
+        # - "This week": last 7 days
+        self.max_age_days = 7
+        self.max_views = 1000
         self.search_results_per_query = 50
         self.min_duration_seconds = 10
         self.min_aspect_ratio = 1.5
+
+        # If you want to use YouTube's *native* search filters, paste the `sp`
+        # parameter from a filtered YouTube search URL here (or set env var
+        # `YT_SEARCH_SP`). Example from user: "EgIIAw%253D%253D".
+        self.youtube_search_sp = self._normalize_sp(os.getenv("YT_SEARCH_SP", "EgIIAw%253D%253D"))
+
+        # Push the upload-date constraint into yt-dlp itself so it can reject
+        # out-of-range videos as early as possible.
+        #
+        # yt-dlp accepts relative dates like "today-14days".
+        opts = dict(options)
+        opts.setdefault("dateafter", f"today-{self.max_age_days}days")
+        self.options = opts
+        self.ydl = YoutubeDL(self.options)
 
         # Keep a small in-memory cache of IDs we've already attempted this run.
         # This reduces repeated lookups from overlapping/random searches.
         self._seen_ids = set()
         self._seen_ids_max = 5000
+
+    @staticmethod
+    def _normalize_sp(sp_value: str) -> str:
+        """
+        Normalize YouTube's `sp` parameter.
+
+        Browsers sometimes show it double-encoded (e.g. %253D instead of %3D).
+        We normalize to a value that can be safely appended to a URL as:
+        `...&sp=<normalized>`.
+        """
+        if not sp_value:
+            return ""
+
+        s = sp_value.strip()
+        if s.startswith("&sp="):
+            s = s[4:]
+        if s.startswith("sp="):
+            s = s[3:]
+
+        # De-double-encode if needed (e.g. %253D -> %3D).
+        prev = None
+        for _ in range(3):
+            if s == prev:
+                break
+            prev = s
+            s = urllib.parse.unquote(s)
+
+        # If it contains raw characters that should be escaped (like '='), encode it once.
+        if "%" not in s and any(ch in s for ch in ("=", "+", "/", " ")):
+            s = urllib.parse.quote(s, safe="")
+
+        return s
 
     def _random_query(self):
         seed_words = [
@@ -73,36 +119,44 @@ class Ydl:
 
         url = self._candidate_url(entry) or ""
         if "/shorts/" in url:
+            print("Skipping shorts video")
             return False
 
         duration = entry.get("duration")
         if isinstance(duration, (int, float)) and duration < self.min_duration_seconds:
+            print("Skipping short video")
             return False
 
         upload_date = entry.get("upload_date")
         if upload_date and not self._is_recent_enough(upload_date):
+            print("Skipping old video")
             return False
 
         view_count = entry.get("view_count")
         if isinstance(view_count, (int, float)) and view_count > self.max_views:
+            print("Skipping video with too many views")
             return False
 
         return True
 
     def _secondary_video_valid(self, info):
         if "/shorts/" in (info.get("webpage_url") or ""):
+            print("Skipping shorts video")
             return False
 
         duration = info.get("duration")
         if isinstance(duration, (int, float)) and duration < self.min_duration_seconds:
+            print("Skipping short video")
             return False
 
         upload_date = info.get("upload_date")
         if upload_date and not self._is_recent_enough(upload_date):
+            print("Skipping old video")
             return False
 
         view_count = info.get("view_count")
         if isinstance(view_count, (int, float)) and view_count > self.max_views:
+            print("Skipping video with too many views")
             return False
 
         try:
@@ -110,12 +164,14 @@ class Ydl:
             # do a metadata-only extraction (process=False).
             ar = info.get("aspect_ratio")
             if isinstance(ar, (int, float)) and ar < self.min_aspect_ratio:
+                print("Skipping video with too small aspect ratio")
                 return False
 
             w = info.get("width")
             h = info.get("height")
             if isinstance(w, (int, float)) and isinstance(h, (int, float)) and h != 0:
                 if (w / h) < self.min_aspect_ratio:
+                    print("Skipping video with too small aspect ratio")
                     return False
         except Exception:
             pass
@@ -135,7 +191,14 @@ class Ydl:
 
         while video is None:
             query = self._random_query()
-            search = f"ytsearchdate{self.search_results_per_query}:{query}"
+            if self.youtube_search_sp:
+                # Use YouTube's own filtered results page.
+                # NOTE: `search_results_per_query` is not enforced here; YouTube will decide how many
+                # results to return. We still randomize and filter locally.
+                search_query = urllib.parse.quote_plus(query)
+                search = f"https://www.youtube.com/results?search_query={search_query}&sp={self.youtube_search_sp}"
+            else:
+                search = f"ytsearchdate{self.search_results_per_query}:{query}"
             try:
                 res = self.ydl.extract_info(search, download=False, process=False)
                 entries = list(res.get("entries") or [])
@@ -210,7 +273,7 @@ def center_crop(image, aspect_ratio):
     else:
         return image
 
-def iter_video_frames(video_file, resolution=(96, 48), target_fps=30):
+def iter_video_frames(video_file, resolution=(96, 48), target_fps=30, max_seconds=30):
     """
     Stream frames from a local video file at (approximately) target_fps.
     This avoids pre-decoding the whole video and avoids cross-process transfer of huge frame arrays.
@@ -226,6 +289,18 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=30):
     frame_index = 0
 
     while True:
+        # Hard stop so we never play for more than max_seconds.
+        # Prefer container timestamps when available; fall back to our pacing clock.
+        try:
+            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            if isinstance(pos_ms, (int, float)) and pos_ms > 0 and (pos_ms / 1000.0) >= max_seconds:
+                break
+        except Exception:
+            pass
+
+        if (time.perf_counter() - start_time) >= max_seconds:
+            break
+
         ret, frame = cap.read()
         if not ret or frame is None:
             break
