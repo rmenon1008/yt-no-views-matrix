@@ -18,7 +18,8 @@ def video_finder(video_queue):
                 video_queue.put(video)
 
 BLANK_FRAME = np.ones((48, 96, 3), dtype=np.uint8) * 255
-STARTUP_FRAME = cv2.cvtColor(cv2.imread("/home/rohan/yt-no-views-matrix/loading.png"), cv2.COLOR_BGR2RGB)
+STARTUP_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "loading.png")
+STARTUP_FRAME = cv2.cvtColor(cv2.imread(STARTUP_IMAGE_PATH), cv2.COLOR_BGR2RGB)
 class App:
     def __init__(self, matrix):
         self.matrix = matrix
@@ -43,7 +44,6 @@ class App:
             return 0
 
     def run(self):
-        # Start playback as soon as we have one video; downloader process keeps the queue full.
         print("Waiting for first downloaded video...")
         while True:
             if self._get_buffered_videos() < 2:

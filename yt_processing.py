@@ -1,30 +1,17 @@
-from requests import get
 import random
 import datetime
-import json
 import time
 import os
-import re
 
 import cv2
 from yt_dlp import YoutubeDL
-import numpy as np
-
-# download_ranges:   A callback function that gets called for every video with
-                    #    the signature (info_dict, ydl) -> Iterable[Section].
-                    #    Only the returned sections will be downloaded.
-                    #    Each Section is a dict with the following keys:
-                    #    * start_time: Start time of the section in seconds
-                    #    * end_time: End time of the section in seconds
-                    #    * title: Section title (Optional)
-                    #    * index: Section number (Optional)
 
 YDL_OPTIONS = {
     'format': 'worstvideo',
     'noplaylist': True,
     'quiet': True,
     'outtmpl': "temp/%(id)s.mp4",
-    'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 30}]
+    'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 30}],
 }
 
 class Ydl:
@@ -32,101 +19,155 @@ class Ydl:
         self.options = options
         self.ydl = YoutubeDL(self.options)
 
-    # def prelim_video_valid(self, candidate):
-    #     if candidate['view_count'] > 10:
-    #         print("Too many views")
-    #         return False
-    #     if "/shorts/" in candidate['url']:
-    #         print("Video is a short")
-    #         return False
-    #     if candidate["duration"] < 20:
-    #         print("Too short")
-    #         return False
-    #     return True
+        self.max_age_days = 14
+        self.max_views = 50
+        self.search_results_per_query = 25
+        self.min_duration_seconds = 20
+        self.min_aspect_ratio = 1.5
 
+    def _random_query(self):
+        seed_words = [
+            "test", "demo", "vlog", "video", "clip", "first", "my", "day", "new", "update",
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+            "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+        ]
+        w1 = random.choice(seed_words)
+        w2 = random.choice(seed_words)
+        if random.random() < 0.6:
+            token = str(random.randint(0, 9999)).zfill(4)
+        else:
+            token = "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(random.randint(3, 5)))
+        if w1 == w2:
+            w2 = random.choice([w for w in seed_words if w != w1])
+        return f"{w1} {w2} {token}"
 
-    # def secondary_video_valid(self, candidate):
-    #     age = datetime.datetime.now(
-    #     ) - datetime.datetime.strptime(candidate['upload_date'], "%Y%m%d")
-    #     if age.days > 30:
-    #         print("Video is too old")
-    #         return False
-    #     if candidate['formats'][0]['width'] / candidate['formats'][0]['height'] < 1.5:
-    #         print("Video is too tall")
-    #         return False
-    #     return True
+    def _is_recent_enough(self, upload_date):
+        try:
+            dt = datetime.datetime.strptime(upload_date, "%Y%m%d")
+            age = datetime.datetime.now() - dt
+            return age.days <= self.max_age_days
+        except Exception:
+            return False
 
+    def _candidate_url(self, entry):
+        url = entry.get("url") or entry.get("webpage_url")
+        if url:
+            return url
+        vid = entry.get("id")
+        if vid:
+            return f"https://www.youtube.com/watch?v={vid}"
+        return None
 
-    # def get_unwatched_video(self):
-    #     video = None
-    #     while video == None:
-    #         rand_num = str(random.randint(0, 7000)).zfill(4)
-    #         candidate = next(self.ydl.extract_info(
-    #             f"ytsearchdate:IMG {rand_num}", download=False, process=False)['entries'])
-    #         if not self.prelim_video_valid(candidate):
-    #             continue
-    #         candidate = self.ydl.extract_info(candidate['url'], download=False)
-    #         if not self.secondary_video_valid(candidate):
-    #             continue
-    #         video = candidate
-    #     return video
+    def _prelim_video_valid(self, entry):
+        vid = entry.get("id")
+        if not vid:
+            return False
+
+        url = self._candidate_url(entry) or ""
+        if "/shorts/" in url:
+            return False
+
+        duration = entry.get("duration")
+        if isinstance(duration, (int, float)) and duration < self.min_duration_seconds:
+            return False
+
+        upload_date = entry.get("upload_date")
+        if upload_date and not self._is_recent_enough(upload_date):
+            return False
+
+        view_count = entry.get("view_count")
+        if isinstance(view_count, (int, float)) and view_count > self.max_views:
+            return False
+
+        return True
+
+    def _secondary_video_valid(self, info):
+        if "/shorts/" in (info.get("webpage_url") or ""):
+            return False
+
+        duration = info.get("duration")
+        if isinstance(duration, (int, float)) and duration < self.min_duration_seconds:
+            return False
+
+        upload_date = info.get("upload_date")
+        if upload_date and not self._is_recent_enough(upload_date):
+            return False
+
+        view_count = info.get("view_count")
+        if isinstance(view_count, (int, float)) and view_count > self.max_views:
+            return False
+
+        try:
+            fmt0 = (info.get("formats") or [None])[0] or {}
+            w = fmt0.get("width")
+            h = fmt0.get("height")
+            if isinstance(w, (int, float)) and isinstance(h, (int, float)) and h != 0:
+                if (w / h) < self.min_aspect_ratio:
+                    return False
+        except Exception:
+            pass
+
+        return True
 
     def get_unwatched_video(self):
-        URL = "https://petittube.com/"
         video = None
-        try:
-            with open('already_watched.json', 'r') as f:
-                already_watched = json.load(f)[:100]
-        except:
-            print("Creating new watched index")
-            already_watched = []
+        backoff = 0.25
+
         while video is None:
+            query = self._random_query()
+            search = f"ytsearchdate{self.search_results_per_query}:{query}"
             try:
-                r = get(URL)
-                if r.status_code == 200:
-                    text = r.text
-                    regex_match = re.search(r'src="https:\/\/www\.youtube\.com\/embed\/(.*?)\?', text)
-                    if regex_match:
-                        yt_id = regex_match.group(1)
-                        if yt_id in already_watched:
-                            print("Video already watched")
-                            continue
-                        else:
-                            already_watched.append(yt_id)
-                            with open('already_watched.json', 'w') as f:
-                                json.dump(already_watched, f)
-                        try:
-                            candidate = self.ydl.extract_info(f'https://www.youtube.com/watch?v={yt_id}', download=False)
-                            if candidate['formats'][0]['width'] / candidate['formats'][0]['height'] >= 1.5:
-                                video = candidate
-                            else:
-                                print("Video too tall")
-                        except:
-                            print("Video is unavailable")
-                            continue
-            except:
-                pass
+                res = self.ydl.extract_info(search, download=False, process=False)
+                entries = list(res.get("entries") or [])
+                if not entries:
+                    time.sleep(backoff)
+                    continue
+
+                random.shuffle(entries)
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not self._prelim_video_valid(entry):
+                        continue
+
+                    url = self._candidate_url(entry)
+                    if not url:
+                        continue
+
+                    try:
+                        info = self.ydl.extract_info(url, download=False)
+                    except Exception:
+                        continue
+
+                    if not self._secondary_video_valid(info):
+                        continue
+
+                    video = info
+                    break
+            except Exception:
+                time.sleep(backoff)
+
+            backoff = min(2.0, backoff * 1.1)
+
         return video
 
     def download_video(self, video):
         try:
             print(f"Downloading video {video['webpage_url']}")
-            out = self.ydl.download([video['webpage_url']])
+            self.ydl.download([video['webpage_url']])
             return f"temp/{video['id']}.mp4"
-        except:
+        except Exception:
             return None
 
 def center_crop(image, aspect_ratio):
     height, width = image.shape[:2]
     image_aspect_ratio = width / height
     if image_aspect_ratio > aspect_ratio:
-        # Crop width
         new_width = int(height * aspect_ratio)
         left = (width - new_width) // 2
         right = width - new_width - left
         return image[:, left:-right]
     elif image_aspect_ratio < aspect_ratio:
-        # Crop height
         new_height = int(width / aspect_ratio)
         top = (height - new_height) // 2
         bottom = height - new_height - top
@@ -154,16 +195,13 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=30):
         if not ret or frame is None:
             break
 
-        # Process frame for the LED matrix
         try:
             frame = center_crop(frame, resolution[0] / resolution[1])
             frame = cv2.resize(frame, resolution, interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         except Exception:
-            # Skip bad frames rather than stalling playback
             continue
 
-        # Pace output
         target_time = start_time + (frame_index / float(target_fps))
         now = time.perf_counter()
         if target_time > now:
@@ -187,7 +225,7 @@ def get_video_frames(video_file, resolution=(96, 48)):
             if not ret:
                 break
             frames.append(frame)
-        except:
+        except Exception:
             break
     video.release()
     return frames
@@ -195,6 +233,6 @@ def get_video_frames(video_file, resolution=(96, 48)):
 def delete_video(video_file):
     try:
         os.remove(video_file)
-    except:
+    except Exception:
         print("Failed to delete video")
         pass
