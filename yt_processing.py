@@ -25,6 +25,11 @@ class Ydl:
         self.min_duration_seconds = 10
         self.min_aspect_ratio = 1.5
 
+        # Keep a small in-memory cache of IDs we've already attempted this run.
+        # This reduces repeated lookups from overlapping/random searches.
+        self._seen_ids = set()
+        self._seen_ids_max = 5000
+
     def _random_query(self):
         seed_words = [
             "test", "demo", "vlog", "video", "clip", "first", "my", "day", "new", "update",
@@ -33,8 +38,6 @@ class Ydl:
             "food", "recipe", "nature", "art", "movie", "review", "unboxing", "science", "technology",
             "learn", "how", "guide", "explore", "trick", "tips", "experiment", "animal", "car", "road",
             "short", "trend", "random", "kids", "play", "let's", "game", "dance", "cute", "best", "hello",
-            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
-            "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
         ]
         w1 = random.choice(seed_words)
         w2 = random.choice(seed_words)
@@ -103,9 +106,14 @@ class Ydl:
             return False
 
         try:
-            fmt0 = (info.get("formats") or [None])[0] or {}
-            w = fmt0.get("width")
-            h = fmt0.get("height")
+            # Prefer lightweight fields first; `formats` is often missing when we
+            # do a metadata-only extraction (process=False).
+            ar = info.get("aspect_ratio")
+            if isinstance(ar, (int, float)) and ar < self.min_aspect_ratio:
+                return False
+
+            w = info.get("width")
+            h = info.get("height")
             if isinstance(w, (int, float)) and isinstance(h, (int, float)) and h != 0:
                 if (w / h) < self.min_aspect_ratio:
                     return False
@@ -113,6 +121,13 @@ class Ydl:
             pass
 
         return True
+
+    def _remember_seen_id(self, vid):
+        if not vid:
+            return
+        self._seen_ids.add(vid)
+        if len(self._seen_ids) > self._seen_ids_max:
+            self._seen_ids.clear()
 
     def get_unwatched_video(self):
         video = None
@@ -135,19 +150,26 @@ class Ydl:
                     if not self._prelim_video_valid(entry):
                         continue
 
+                    vid = entry.get("id")
+                    if vid and vid in self._seen_ids:
+                        continue
+
                     url = self._candidate_url(entry)
                     if not url:
                         continue
 
                     try:
-                        info = self.ydl.extract_info(url, download=False)
+                        info = self.ydl.extract_info(url, download=False, process=False)
                     except Exception:
+                        self._remember_seen_id(vid)
                         continue
 
                     if not self._secondary_video_valid(info):
+                        self._remember_seen_id(vid or info.get("id"))
                         continue
 
                     video = info
+                    self._remember_seen_id(vid or info.get("id"))
                     break
             except Exception:
                 time.sleep(backoff)
@@ -158,8 +180,16 @@ class Ydl:
 
     def download_video(self, video):
         try:
-            print(f"Downloading video {video['webpage_url']}")
-            self.ydl.download([video['webpage_url']])
+            url = video.get("webpage_url") or video.get("original_url") or video.get("url")
+            if not url:
+                vid = video.get("id")
+                if vid:
+                    url = f"https://www.youtube.com/watch?v={vid}"
+            if not url:
+                return None
+
+            print(f"Downloading video {url}")
+            self.ydl.download([url])
             return f"temp/{video['id']}.mp4"
         except Exception:
             return None
