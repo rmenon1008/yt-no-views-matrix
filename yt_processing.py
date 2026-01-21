@@ -20,14 +20,19 @@ class Ydl:
         self.ydl = YoutubeDL(self.options)
 
         self.max_age_days = 14
-        self.max_views = 50
-        self.search_results_per_query = 25
-        self.min_duration_seconds = 20
+        self.max_views = 200
+        self.search_results_per_query = 50
+        self.min_duration_seconds = 10
         self.min_aspect_ratio = 1.5
 
     def _random_query(self):
         seed_words = [
             "test", "demo", "vlog", "video", "clip", "first", "my", "day", "new", "update",
+            "img", "dsc", "camera", "phone", "setup", "build", "repair", "art", "music", "cover", "song",
+            "life", "travel", "dog", "cat", "challenge", "fun", "music", "workout", "fitness",
+            "food", "recipe", "nature", "art", "movie", "review", "unboxing", "science", "technology",
+            "learn", "how", "guide", "explore", "trick", "tips", "experiment", "animal", "car", "road",
+            "short", "trend", "random", "kids", "play", "let's", "game", "dance", "cute", "best", "hello",
             "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
             "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
         ]
