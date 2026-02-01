@@ -8,19 +8,20 @@ import cv2
 from yt_dlp import YoutubeDL
 
 YDL_OPTIONS = {
-    'format': 'worstvideo',
+    'format': '18/best[ext=mp4][acodec!=none][vcodec!=none][height<=360]/best[ext=mp4][acodec!=none][vcodec!=none]/best',
     'noplaylist': True,
     'quiet': True,
     'outtmpl': "temp/%(id)s.mp4",
     'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 30}],
+    'remote_components': ['ejs:github'],
 }
 
 class Ydl:
     def __init__(self, options):
         # Coarse buckets:
         # - "This week": last 7 days
-        self.max_age_days = 7
-        self.max_views = 1000
+        self.max_age_days = 2
+        self.max_views = 200
         self.search_results_per_query = 50
         self.min_duration_seconds = 10
         self.min_aspect_ratio = 1.5
@@ -119,7 +120,7 @@ class Ydl:
 
         url = self._candidate_url(entry) or ""
         if "/shorts/" in url:
-            print("Skipping shorts video")
+            print(f"Skipping {url}: not a shorts video")
             return False
 
         duration = entry.get("duration")
@@ -243,6 +244,9 @@ class Ydl:
 
     def download_video(self, video):
         try:
+            # Ensure output directory exists
+            os.makedirs("temp", exist_ok=True)
+
             url = video.get("webpage_url") or video.get("original_url") or video.get("url")
             if not url:
                 vid = video.get("id")
