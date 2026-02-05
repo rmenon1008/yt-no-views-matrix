@@ -7,11 +7,16 @@ import urllib.parse
 import cv2
 from yt_dlp import YoutubeDL
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+
 YDL_OPTIONS = {
     'format': '18/best[ext=mp4][acodec!=none][vcodec!=none][height<=360]/best[ext=mp4][acodec!=none][vcodec!=none]/best',
     'noplaylist': True,
     'quiet': True,
-    'outtmpl': "temp/%(id)s.mp4",
+    # Use an absolute temp dir so running under systemd/cron/etc doesn't write
+    # to an unexpected working directory.
+    'outtmpl': os.path.join(TEMP_DIR, "%(id)s.%(ext)s"),
     'download_ranges': lambda info_dict, ydl: [{'start_time': 0, 'end_time': 30}],
     'remote_components': ['ejs:github'],
 }
@@ -20,8 +25,8 @@ class Ydl:
     def __init__(self, options):
         # Coarse buckets:
         # - "This week": last 7 days
-        self.max_age_days = 2
-        self.max_views = 200
+        self.max_age_days = 7
+        self.max_views = 1000
         self.search_results_per_query = 50
         self.min_duration_seconds = 10
         self.min_aspect_ratio = 1.5
@@ -37,6 +42,28 @@ class Ydl:
         # yt-dlp accepts relative dates like "today-14days".
         opts = dict(options)
         opts.setdefault("dateafter", f"today-{self.max_age_days}days")
+
+        # Allow disabling features that are more likely to break on minimal installs.
+        # (e.g. missing certs for remote components, missing ffmpeg for ranged downloads)
+        if os.getenv("YT_NO_REMOTE_COMPONENTS", "").strip() in ("1", "true", "True", "yes", "YES"):
+            opts.pop("remote_components", None)
+        if os.getenv("YT_DISABLE_RANGES", "").strip() in ("1", "true", "True", "yes", "YES"):
+            opts.pop("download_ranges", None)
+
+        # Minimal progress hook to see the *actual* output path on device.
+        def _progress_hook(d):
+            status = d.get("status")
+            if status == "finished":
+                fn = d.get("filename")
+                if fn:
+                    print(f"yt-dlp finished: {fn}")
+            elif status == "error":
+                print(f"yt-dlp error: {d}")
+
+        # Even with quiet=True, progress hooks still run.
+        existing_hooks = list(opts.get("progress_hooks") or [])
+        opts["progress_hooks"] = existing_hooks + [_progress_hook]
+
         self.options = opts
         self.ydl = YoutubeDL(self.options)
 
@@ -244,8 +271,8 @@ class Ydl:
 
     def download_video(self, video):
         try:
-            # Ensure output directory exists
-            os.makedirs("temp", exist_ok=True)
+            # Ensure output directory exists (absolute, stable across processes/services)
+            os.makedirs(TEMP_DIR, exist_ok=True)
 
             url = video.get("webpage_url") or video.get("original_url") or video.get("url")
             if not url:
@@ -256,9 +283,31 @@ class Ydl:
                 return None
 
             print(f"Downloading video {url}")
-            self.ydl.download([url])
-            return f"temp/{video['id']}.mp4"
-        except Exception:
+            print(f"cwd={os.getcwd()}")
+            print(f"TEMP_DIR={TEMP_DIR}")
+
+            # Use extract_info(download=True) so we can deterministically derive the output filename.
+            info = self.ydl.extract_info(url, download=True)
+            filename = None
+            try:
+                filename = self.ydl.prepare_filename(info)
+            except Exception:
+                # Fallback to expected mp4 name if prepare_filename fails for some reason.
+                vid = (info or {}).get("id") or video.get("id")
+                if vid:
+                    filename = os.path.join(TEMP_DIR, f"{vid}.mp4")
+
+            if filename and os.path.exists(filename):
+                return filename
+
+            # Helpful extra signal: check if a partial file was left behind.
+            if filename and os.path.exists(f"{filename}.part"):
+                print(f"Download left partial file: {filename}.part")
+            else:
+                print(f"Download completed but file not found: {filename}")
+            return None
+        except Exception as e:
+            print(f"Download failed: {type(e).__name__}: {e}")
             return None
 
 def center_crop(image, aspect_ratio):
