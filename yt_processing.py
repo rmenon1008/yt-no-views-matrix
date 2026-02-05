@@ -277,9 +277,12 @@ def center_crop(image, aspect_ratio):
     else:
         return image
 
-def iter_video_frames(video_file, resolution=(96, 48), target_fps=30, max_seconds=30):
+def iter_video_frames(video_file, resolution=(96, 48), target_fps=None, max_seconds=30):
     """
-    Stream frames from a local video file at (approximately) target_fps.
+    Stream frames from a local video file at the correct frame rate.
+
+    If `target_fps` is None, we pace to the video's own timestamps/FPS (preferred).
+    If `target_fps` is provided, we pace to that value (useful for downsampling).
     This avoids pre-decoding the whole video and avoids cross-process transfer of huge frame arrays.
     """
     print(f"Streaming frames: {video_file}")
@@ -289,7 +292,21 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=30, max_second
         cap.release()
         return
 
-    start_time = time.perf_counter()
+    def _get_capture_fps():
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+        except Exception:
+            fps = 0.0
+        # OpenCV may return 0/NaN/inf for some containers.
+        if not (fps > 1e-6) or fps != fps or fps == float("inf"):
+            return None
+        return fps
+
+    capture_fps = _get_capture_fps()
+    paced_fps = float(target_fps) if target_fps is not None else (capture_fps or 30.0)
+
+    start_wall = time.perf_counter()
+    base_pos_ms = None
     frame_index = 0
 
     while True:
@@ -302,7 +319,7 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=30, max_second
         except Exception:
             pass
 
-        if (time.perf_counter() - start_time) >= max_seconds:
+        if (time.perf_counter() - start_wall) >= max_seconds:
             break
 
         ret, frame = cap.read()
@@ -316,10 +333,29 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=30, max_second
         except Exception:
             continue
 
-        target_time = start_time + (frame_index / float(target_fps))
+        # Pace playback.
+        #
+        # Prefer the video's own timestamps (better for variable-FPS content).
+        # If timestamps aren't available, pace using FPS.
         now = time.perf_counter()
-        if target_time > now:
-            time.sleep(target_time - now)
+        target_wall = None
+        try:
+            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            if isinstance(pos_ms, (int, float)) and pos_ms > 0:
+                if base_pos_ms is None:
+                    base_pos_ms = pos_ms
+                    # Anchor "video time 0" to the current wall clock.
+                    start_wall = now
+                target_wall = start_wall + ((pos_ms - base_pos_ms) / 1000.0)
+        except Exception:
+            target_wall = None
+
+        if target_wall is None:
+            target_wall = start_wall + (frame_index / paced_fps)
+
+        sleep_for = target_wall - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
 
         frame_index += 1
         yield frame

@@ -52,7 +52,8 @@ class App:
             print(f"Playing new video: {video_file}")
 
             try:
-                for frame in iter_video_frames(video_file, resolution=(96, 48), target_fps=30):
+                # Pace playback to the video's real timestamps/FPS.
+                for frame in iter_video_frames(video_file, resolution=(96, 48)):
                     self.matrix.set_pixels(frame)
             finally:
                 delete_video(video_file)
