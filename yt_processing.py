@@ -216,9 +216,13 @@ class Ydl:
     def get_unwatched_video(self):
         video = None
         backoff = 0.25
+        search_attempts = 0
 
         while video is None:
+            search_attempts += 1
             query = self._random_query()
+            print(f"Search attempt #{search_attempts} with query: {query}")
+
             if self.youtube_search_sp:
                 # Use YouTube's own filtered results page.
                 # NOTE: `search_results_per_query` is not enforced here; YouTube will decide how many
@@ -227,10 +231,14 @@ class Ydl:
                 search = f"https://www.youtube.com/results?search_query={search_query}&sp={self.youtube_search_sp}"
             else:
                 search = f"ytsearchdate{self.search_results_per_query}:{query}"
+
             try:
+                print(f"Extracting search results from: {search}")
                 res = self.ydl.extract_info(search, download=False, process=False)
                 entries = list(res.get("entries") or [])
+                print(f"Found {len(entries)} search results")
                 if not entries:
+                    print("No entries found, sleeping and retrying...")
                     time.sleep(backoff)
                     continue
 
@@ -243,6 +251,7 @@ class Ydl:
 
                     vid = entry.get("id")
                     if vid and vid in self._seen_ids:
+                        print(f"Video {vid} already seen, skipping")
                         continue
 
                     url = self._candidate_url(entry)
@@ -250,8 +259,10 @@ class Ydl:
                         continue
 
                     try:
+                        print(f"Extracting video info for: {url}")
                         info = self.ydl.extract_info(url, download=False, process=False)
-                    except Exception:
+                    except Exception as e:
+                        print(f"Failed to extract video info: {type(e).__name__}: {e}")
                         self._remember_seen_id(vid)
                         continue
 
@@ -261,12 +272,15 @@ class Ydl:
 
                     video = info
                     self._remember_seen_id(vid or info.get("id"))
+                    print(f"Selected video: {video.get('id', 'unknown')}")
                     break
-            except Exception:
+            except Exception as e:
+                print(f"Search failed: {type(e).__name__}: {e}, sleeping {backoff}s")
                 time.sleep(backoff)
 
             backoff = min(2.0, backoff * 1.1)
 
+        print(f"Successfully found video after {search_attempts} search attempts")
         return video
 
     def download_video(self, video):
@@ -283,8 +297,6 @@ class Ydl:
                 return None
 
             print(f"Downloading video {url}")
-            print(f"cwd={os.getcwd()}")
-            print(f"TEMP_DIR={TEMP_DIR}")
 
             # Use extract_info(download=True) so we can deterministically derive the output filename.
             info = self.ydl.extract_info(url, download=True)
@@ -337,28 +349,30 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=None, max_seco
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"Streaming frames: {video_file}")
+    print(f"Starting frame streaming for: {video_file}")
 
     # Check if file exists and is readable
     if not os.path.exists(video_file):
-        logger.error(f"Video file does not exist: {video_file}")
+        print(f"ERROR: Video file does not exist: {video_file}")
         return
 
     try:
         file_size = os.path.getsize(video_file)
         if file_size == 0:
-            logger.error(f"Video file is empty: {video_file}")
+            print(f"ERROR: Video file is empty: {video_file}")
             return
-        logger.debug(f"Video file size: {file_size} bytes")
+        print(f"Video file size: {file_size} bytes")
     except Exception as e:
-        logger.error(f"Error checking video file: {e}")
+        print(f"ERROR: Error checking video file: {e}")
         return
 
     cap = cv2.VideoCapture(video_file)
     if not cap.isOpened():
-        logger.error(f"Failed to open video: {video_file}")
+        print(f"ERROR: Failed to open video: {video_file}")
         cap.release()
         return
+
+    print("Video capture opened successfully")
 
     def _get_capture_fps():
         try:
@@ -428,6 +442,7 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=None, max_seco
         frame_index += 1
         yield frame
 
+    print(f"Finished streaming {frame_index} frames from {video_file}")
     cap.release()
 
 def get_video_frames(video_file, resolution=(96, 48)):
@@ -450,7 +465,10 @@ def get_video_frames(video_file, resolution=(96, 48)):
 
 def delete_video(video_file):
     try:
-        os.remove(video_file)
-    except Exception:
-        print("Failed to delete video")
-        pass
+        if os.path.exists(video_file):
+            os.remove(video_file)
+            print(f"Successfully deleted video file: {video_file}")
+        else:
+            print(f"Video file already deleted or doesn't exist: {video_file}")
+    except Exception as e:
+        print(f"Failed to delete video {video_file}: {type(e).__name__}: {e}")

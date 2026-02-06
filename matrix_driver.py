@@ -24,7 +24,12 @@ class Matrix:
     def set_pixels(self, pixels):
         if pixels.shape == (48, 96, 3):
             data = pixels.tobytes()
-            self.spi.writebytes2(data)
+            try:
+                self.spi.writebytes2(data)
+            except Exception as e:
+                print(f"Error writing to SPI: {type(e).__name__}: {e}")
+        else:
+            print(f"Invalid pixel shape: {pixels.shape}, expected (48, 96, 3)")
 
     def reset(self):
         gpio.setmode(gpio.BCM)
