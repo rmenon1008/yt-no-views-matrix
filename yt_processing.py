@@ -334,10 +334,29 @@ def iter_video_frames(video_file, resolution=(96, 48), target_fps=None, max_seco
     If `target_fps` is provided, we pace to that value (useful for downsampling).
     This avoids pre-decoding the whole video and avoids cross-process transfer of huge frame arrays.
     """
-    print(f"Streaming frames: {video_file}")
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Streaming frames: {video_file}")
+
+    # Check if file exists and is readable
+    if not os.path.exists(video_file):
+        logger.error(f"Video file does not exist: {video_file}")
+        return
+
+    try:
+        file_size = os.path.getsize(video_file)
+        if file_size == 0:
+            logger.error(f"Video file is empty: {video_file}")
+            return
+        logger.debug(f"Video file size: {file_size} bytes")
+    except Exception as e:
+        logger.error(f"Error checking video file: {e}")
+        return
+
     cap = cv2.VideoCapture(video_file)
     if not cap.isOpened():
-        print("Failed to open video")
+        logger.error(f"Failed to open video: {video_file}")
         cap.release()
         return
 
